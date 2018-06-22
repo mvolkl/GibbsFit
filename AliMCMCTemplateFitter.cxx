@@ -29,6 +29,9 @@ AliMCMCTemplateFitter::AliMCMCTemplateFitter(Int_t nMCFunctions, TH1D ** MCDistr
   fNPar=nMCFunctions;
   fFitDiagsMC=MCDistributions;
   fFitDiagData=dataHistogram;
+  AjiPriorExponent = -1; // reasonable standard
+  fLowBinFitRange = 1;
+  fHighBinFitRange = fFitDiagData->GetNbinsX();
   
   fHasMonotonyPrior = new Bool_t[fNPar];
   fMonotonyPriorLowBin = new Int_t[fNPar];
@@ -55,7 +58,7 @@ AliMCMCTemplateFitter::AliMCMCTemplateFitter(Int_t nMCFunctions, TH1D ** MCDistr
       fpj[j]=fFitDiagData->Integral()/MCDistributions[j]->Integral()/double(fNPar); // Guess: Each template contributes equally
   }
   // Create Output Histograms
-  fpjMarginals = new TH1D*[fNPar];
+  //fpjMarginals = new TH1D*[fNPar];
   for(int j=0;j<fNPar;j++)
   {
       fpjMarginals[j]=new TH1D(Form("p%dMarginal", j), "", 1000, 0., fFitDiagData->Integral()/MCDistributions[j]->Integral()*fSafetyFactor);
@@ -106,6 +109,8 @@ AliMCMCTemplateFitter::~AliMCMCTemplateFitter()
   delete[] fpjMarginals;
   for(int j=0;j<fNPar*fNPar;j++)
       delete fpj2DMarginals[j];
+  for(int j=0;j<fNPar;j++)
+      delete fAjiMarginals[j];
   delete[] fpj2DMarginals;
   delete minimizingObject;
   delete[] fHasMonotonyPrior;
@@ -113,9 +118,63 @@ AliMCMCTemplateFitter::~AliMCMCTemplateFitter()
   delete[] fMonotonyPriorHighBin;
 }
 
+void AliMCMCTemplateFitter::SetFitRange(Double_t low, Double_t up)
+{
+    fLowBinFitRange = TMath::Max(fFitDiagData->GetXaxis()->FindBin(low), 1);
+    fHighBinFitRange = TMath::Min(fFitDiagData->GetXaxis()->FindBin(up), fFitDiagData->GetNbinsX());
+    for(int j=0;j<fNPar;j++)
+        for(int i=0;i<fLowBinFitRange-1;i++)
+            fAji[j*fNBins+i]=0.;
+    for(int j=fHighBinFitRange;j<fNPar;j++)
+        for(int i=0;i<fNBins;i++)
+            fAji[j*fNBins+i]=0.;
+    
+}
+
+Bool_t AliMCMCTemplateFitter::FollowsPrior(int j)
+{
+    if(!fHasMonotonyPrior[j]) return kTRUE;
+    double Max = 0.;
+    int mBin = 0;
+    for(int m=0;m<fNBins;m++)
+        if(fAji[j*fNBins+m] > Max)
+        {
+            Max = fAji[j*fNBins+m];
+            mBin = m;
+        }
+    Bool_t Correct = kTRUE;
+    if(mBin < fMonotonyPriorLowBin[j] || mBin > fMonotonyPriorHighBin[j]) Correct = kFALSE;
+    for(int i=0;i<mBin;i++)
+        if(fAji[j*fNBins+i]>fAji[j*fNBins+i+1]) Correct = kFALSE;
+    for(int i=mBin+1;i<fNBins;i++)
+        if(fAji[j*fNBins+i]>fAji[j*fNBins+i-1]) Correct = kFALSE;
+    return Correct;
+}
+
+void AliMCMCTemplateFitter::ForcePrior(int j)
+{
+    double Max = 0.;
+    int mBin = 0;
+    for(int m=0;m<fNBins;m++)
+        if(fAji[j*fNBins+m] > Max)
+        {
+            Max = fAji[j*fNBins+m];
+            mBin = m;
+        }
+    if(!(mBin >= fMonotonyPriorLowBin[j] && mBin <= fMonotonyPriorHighBin[j]))
+    {
+        mBin = (fMonotonyPriorLowBin[j] + fMonotonyPriorHighBin[j])/2;
+        fAji[j*fNBins+mBin]=Max;
+    }
+    for(int i=mBin+1;i<fNBins;i++)
+        if(fAji[j*fNBins+i-1]<fAji[j*fNBins+i]) fAji[j*fNBins+i] = fAji[j*fNBins+i-1]*0.999;
+    for(int i=0;i<mBin;i++)
+        if(fAji[j*fNBins+i+1]<fAji[j*fNBins+i]) fAji[j*fNBins+i] = fAji[j*fNBins+i+1]*0.999;
+}
+
 void AliMCMCTemplateFitter::MakeLimitsFromPrior(Int_t j, Int_t i, Double_t &lower, Double_t &upper)
 {
-    // Important: The initial point must conform to the prior!
+    // Important: The initial point must conform to the prior! -- so far: burn-in should take care of this!
     lower = 0.;
     upper = 10000.;
     if(fHasMonotonyPrior[j])
@@ -166,18 +225,21 @@ void AliMCMCTemplateFitter::MakeLimitsFromPrior(Int_t j, Int_t i, Double_t &lowe
             if(i == PeakPosition)
             {
                 upper = 10000.;
-                if(i==0 || i==fNBins-1) lower = 0.;
-                else lower = TMath::Min(fAji[j*fNBins+i+1], fAji[j*fNBins+i-1]);
+                if(i==0 || i==fNBins-1) lower = 0.; // this is wrong but should rarely happen
+                else
+                {
+                    if(i > fMonotonyPriorLowBin[j] && i < fMonotonyPriorHighBin[j]) lower = TMath::Min(fAji[j*fNBins+i+1], fAji[j*fNBins+i-1]);
+                    if(i > fMonotonyPriorLowBin[j] && i == fMonotonyPriorHighBin[j]) lower = fAji[j*fNBins+i+1];
+                    if(i < fMonotonyPriorHighBin[j] && i == fMonotonyPriorLowBin[j]) lower = fAji[j*fNBins+i-1];
+                    if(i == fMonotonyPriorLowBin[j] && i == fMonotonyPriorHighBin[j]) lower = TMath::Max(fAji[j*fNBins+i+1], fAji[j*fNBins+i-1]);
+                }
             }
         }   
     }
-    if(lower >= upper)
+    if(lower > upper)
     {
         if(TMath::Abs(lower-upper)>1.e-10 && !IsBurnIn)
-            cout << "monotony not given. lower= " << lower << " upper= " << upper << endl;
-        double temp = lower;
-        lower = upper;
-        upper = temp;
+            cout << "monotony not given. lower= " << lower << " upper= " << upper << ", bin " << i << " source " << j << ", A(i-1)= " << fAji[j*fNBins+i-1] << ", A(i+1)= " << fAji[j*fNBins+i+1] << endl;
     }
 }
 
@@ -188,7 +250,7 @@ void AliMCMCTemplateFitter::Calulatelogfpj(Int_t &npar, Double_t *gin, Double_t 
     double fi=0.;
     double di=0.;
     f=0.;
-    for(int i=0;i<fNBins;i++)
+    for(int i=fLowBinFitRange-1;i<fHighBinFitRange;i++)
     {
         di = fFitDiagData->GetBinContent(i+1);
         fi=0.;
@@ -201,14 +263,28 @@ void AliMCMCTemplateFitter::Calulatelogfpj(Int_t &npar, Double_t *gin, Double_t 
     f = -f; // uses Minimizer
 }
 
+double AliMCMCTemplateFitter::SampleGaus(double mu, double sigma, double lower, double upper)
+{
+    if(sigma==0)
+        return mu;
+    double a = (lower-mu)/sigma/TMath::Sqrt(2.);
+    double b = (upper-mu)/sigma/TMath::Sqrt(2.);
+    double lowerIntegral = TMath::Erf(a);
+    double upperIntegral = TMath::Erf(b);
+    double rdNumber = lowerIntegral + (upperIntegral-lowerIntegral)*rd->Rndm();
+    return mu + sigma * TMath::ErfInverse(rdNumber)*TMath::Sqrt(2.);
+}
+
+
 double AliMCMCTemplateFitter::SamplePoissonLikelihoodInvGamma(Int_t n, Double_t a, Double_t b)
 {
+    //if(n>300) return SampleGaus(double(n), TMath::Sqrt(double(n)), a, b);
     double Xlow = TMath::Gamma(double(n+1), a) / 1.;
     double Xhigh = TMath::Gamma(double(n+1), b) / 1.;
     double x = Xlow + (Xhigh - Xlow) * rd->Rndm();
     double returnValue = ::ROOT::MathMore::gamma_quantile(x, n+1, 1.);
     Int_t iterations=0;
-    if(isinf(returnValue))cout << "Value is infinite" << endl;
+    if(isinf(returnValue))cout << "Value is infinite, n=" << n << " a= " << a << " b=" <<b << endl;
     while(isnan(returnValue) && iterations<10) // This is necessary, because the function does not always converge
     {
         fFailedConvergences++;
@@ -273,7 +349,6 @@ double AliMCMCTemplateFitter::SampleConditionalProbabilitypj(Int_t j)
         else
             pjymax += di * (TMath::Log(di)-1.); // leads to problems if di = 0
     }*/
-    
     Int_t temp=0.;
     fConsideredParameter=j;
     minimizingObject->mnparm(0, Form("pjparameter"), fpj[j], fpjMarginals[j]->GetXaxis()->GetXmax()/20., 0., fpjMarginals[j]->GetXaxis()->GetXmax(), temp);
@@ -306,7 +381,7 @@ double AliMCMCTemplateFitter::SampleConditionalProbabilitypj(Int_t j)
         y=rd->Rndm()*pjymax;
         fy = 0.;
         
-        for(int i=0;i<fNBins;i++)
+        for(int i=fLowBinFitRange-1;i<fHighBinFitRange;i++)
         {
             fi = 0.;
             di = fFitDiagData->GetBinContent(i+1);
@@ -331,8 +406,8 @@ double AliMCMCTemplateFitter::SampleConditionalProbabilitypj(Int_t j)
 double AliMCMCTemplateFitter::SampleConditionalPropabilityAjiajiIsMinusOne(Int_t j, Int_t i, Double_t a, Double_t b)
 {  // Sample conditional B-B probability in range (a,b)
     Int_t aji = -1; // Changing aji is where a prior on the Aji could be applied
-    if(a < 1.e-10) return 0; // Later do this with more cases
-    if(b-a < 1.e-10) return a;
+    if(a < 1.e-8) return 0; // Later do this with more cases
+    if(b-a < 1.e-8) return a;
     Int_t di = fFitDiagData->GetBinContent(i+1);
     Double_t pj = fpj[j];
     Double_t fwoj = 0.;
@@ -422,9 +497,9 @@ double AliMCMCTemplateFitter::SampleConditionalPropabilityAjiajiIsMinusOne(Int_t
 
 double AliMCMCTemplateFitter::SampleConditionalProbabilityAji(Int_t j, Int_t i, Double_t a, Double_t b)
 {  // Sample conditional B-B probability in range (a,b)
-    Int_t aji = fFitDiagsMC[j]->GetBinContent(i+1) -1; // Changing aji, this is where a prior on the Aji could be applied
+    Int_t aji = fFitDiagsMC[j]->GetBinContent(i+1) + AjiPriorExponent; // Changing aji, this is where a prior on the Aji is applied
     if(aji<0) return SampleConditionalPropabilityAjiajiIsMinusOne(j, i, a, b); // Later do this with more cases
-    if(b-a < 1.e-10) return a;
+    if(b-a < 1.e-8) return a;
     Int_t di = fFitDiagData->GetBinContent(i+1);
     Double_t pj = fpj[j];
     Double_t fwoj = 0.;
@@ -470,7 +545,21 @@ double AliMCMCTemplateFitter::SampleConditionalProbabilityAji(Int_t j, Int_t i, 
     {
         //ReducedGammaNormalization *= aji+l;
         aSecondFactor *= aPrime/double(aji+l);
+        if(aSecondFactor < 1.e-100) // for large di, the initial secondFactors may be numerically 0. in this case, they should be calculated later on
+        {
+            if(aPrime>1.e-100){
+            if((aji+l) < 80)
+                aSecondFactor = TMath::Exp((aji+l)*TMath::Log(aPrime) -aPrime) / TMath::Gamma((aji+l)+1);
+            else // Stirling's approximation, crashes if a/bPrime=0
+                aSecondFactor = TMath::Exp(double((aji+l))*TMath::Log(aPrime*TMath::E()/double((aji+l))) - aPrime - 0.5 *TMath::Log(2.*TMath::Pi() * double((aji+l))));
+            }
+        }
         bSecondFactor *= bPrime/double(aji+l);
+        if(bSecondFactor < 1.e-100)  // prefactor is not so easy to get correct
+        {
+            if((aji+l) < 80) bSecondFactor = TMath::Exp((aji+l)*TMath::Log(bPrime) -bPrime) / TMath::Gamma((aji+l)+1);
+            else bSecondFactor = TMath::Exp(double((aji+l))*TMath::Log(bPrime*TMath::E()/double((aji+l))) - bPrime - 0.5 *TMath::Log(2.*TMath::Pi() * double((aji+l))));
+        }
         Prefactor += TMath::Log(double(di-(l-1)) / double(l) / (pj+1.) / (fwoj/pj) * double(aji+l)); // Use recursive formula
         GammaA = GammaA - aSecondFactor; // Also recursive formula for incomplete gamma function
         GammaB = GammaB - bSecondFactor;
@@ -511,7 +600,13 @@ double AliMCMCTemplateFitter::SampleConditionalProbabilityAji(Int_t j, Int_t i, 
     Double_t RandomNumber = SamplePoissonLikelihoodInvGamma(aji+l, aPrime, bPrime);
     RandomNumber = RandomNumber/(pj+1.); // To transform back to Aji
     delete[] Integral;
-    if(!(RandomNumber>a && RandomNumber<b)) cout << "Error: Random number " << RandomNumber << " is not between " << a << " and " << b << endl;
+    if(!(RandomNumber>a && RandomNumber<b))
+    {
+        if(!IsBurnIn)
+            cout << "Error: Random number " << RandomNumber << " is not between " << a << " and " << b << " (aji+l=" << aji+l << ")" << endl;
+        RandomNumber = (a+b)/2.;
+    }
+    
     return RandomNumber;
 }
 
@@ -523,13 +618,33 @@ void AliMCMCTemplateFitter::DoOneIteration(void)
     {
         fpj[j] = SampleConditionalProbabilitypj(j);
     }
+    //Double_t valuebefore = 0., valueafter =0.;
+    //Bool_t wascorrect=kTRUE;
     for(int j=0;j<fNPar;j++)
     {
-        for(int i=0;i<fNBins;i++)
+        for(int i=fLowBinFitRange-1;i<fHighBinFitRange;i++) // Here bins in ordering of Histo (start at 1)
         {
+            //wascorrect = FollowsPrior(j);
+            //valuebefore = fAji[j*fNBins+i];
             MakeLimitsFromPrior(j, i, lowerLimit, upperLimit);
-            fAji[j*fNBins+i] = SampleConditionalProbabilityAji(j, i, lowerLimit, upperLimit); // later, limits can be set
+            //if(upperLimit<lowerLimit) cout << "Limit ordering problem: " << lowerLimit << " not smaller than " << upperLimit << endl;
+            if(upperLimit>=lowerLimit)
+                fAji[j*fNBins+i] = SampleConditionalProbabilityAji(j, i, lowerLimit, upperLimit);
+            else
+            {
+                if(!IsBurnIn)
+                    cout << "Sampling failed j=" << j << " i=" << i << " followsPrior: " << FollowsPrior(j) << endl;
+                fAji[j*fNBins+i] = (fAji[j*fNBins+i+1]+fAji[j*fNBins+i-1])/2.;
+                //fAji[j*fNBins+i] = 0.; // this is bad
+            }
+            /*if(wascorrect && !FollowsPrior(j))
+            {
+                cout << "Does not follow prior anymore.  Value "<< valuebefore << " in bin " << i << " changed to " << fAji[j*fNBins+i] << " between ajacent bins " << fAji[j*fNBins+i-1] << " and " << fAji[j*fNBins+i+1] << " with limits " << lowerLimit << " - " << upperLimit << endl;
+            }*/
+            
         }
+        if(!FollowsPrior(j) && !IsBurnIn)
+            cout << "Stopped following prior" << endl;
     }
 }
 
@@ -622,13 +737,14 @@ void AliMCMCTemplateFitter::Fit(Int_t Iterations)
     auto t2 = std::chrono::high_resolution_clock::now();
     fNIterations = Iterations;
     PrepareCorrelations();
+    for(int j=0;j<fNPar;j++) ForcePrior(j);
     Int_t BurnInIterations = Int_t(fNIterations * fBurnInRatio);
     if(TextOutput) cout << "Starting burn-in with " << BurnInIterations << " iterations." << endl;
     IsBurnIn = kTRUE;
     t1 = std::chrono::high_resolution_clock::now();
     for(int iter=0;iter<BurnInIterations;iter++)
     {
-        if(TextOutput) if((iter*100)/BurnInIterations>((iter-1)*100)/BurnInIterations) cout << "\r" << (iter*100)/BurnInIterations << "\%  " << flush;
+        //if(TextOutput) if((iter*100)/BurnInIterations>((iter-1)*100)/BurnInIterations) cout << "\r" << (iter*100)/BurnInIterations << "\%  " << flush;
         DoOneIteration();
     }
     t2 = std::chrono::high_resolution_clock::now();
@@ -642,7 +758,7 @@ void AliMCMCTemplateFitter::Fit(Int_t Iterations)
     fFailedConvergences = 0; // Reset, only failed convergences in main fit are relevant
     for(int iter=0;iter<fNIterations;iter++)
     {
-        if(TextOutput) if((iter*100)/fNIterations>((iter-1)*100)/fNIterations) cout << "\r" << (iter*100)/fNIterations << "\%  " << flush;
+        //if(TextOutput) if((iter*100)/fNIterations>((iter-1)*100)/fNIterations) cout << "\r" << (iter*100)/fNIterations << "\%  " << flush;
         DoOneIteration();
         FillStatisticsObjects(iter);
     }
