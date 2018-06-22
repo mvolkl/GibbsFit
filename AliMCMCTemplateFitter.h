@@ -32,6 +32,9 @@ public:
   void SetPrepareAjiAutocorrelation(Bool_t PrepareAutocorrelation = kTRUE){fMakeAjiCorrelations = PrepareAutocorrelation;}
   void SetMonotonyPrior(Int_t j, Int_t binBelowPeak, Int_t binAbovePeak){fHasMonotonyPrior[j]=kTRUE; fMonotonyPriorLowBin[j] = binBelowPeak; fMonotonyPriorHighBin[j]=binAbovePeak;}
   void SetBurnInRatio(Double_t BurnInRatio = 0.1){fBurnInRatio = BurnInRatio;}
+  void SetConstantAjiPrior(void){AjiPriorExponent=0;}
+  void SetInverseAjiPrior(void){AjiPriorExponent=-1;}
+  void SetFitRange(Double_t low, Double_t up);
   
 private:
   double SamplePoissonLikelihoodInvGamma(Int_t n, Double_t a, Double_t b);
@@ -39,14 +42,18 @@ private:
   double SampleConditionalPropabilityAjiajiIsMinusOne(Int_t j, Int_t i, Double_t a, Double_t b);
   double SampleExpOverX(double a, double b);
   double SampleConditionalProbabilitypj(Int_t j);
+  double SampleGaus(double mu, double sigma, double lower, double upper);
   void MakeLimitsFromPrior(Int_t j, Int_t i, Double_t &lower, Double_t &upper);
   void FillStatisticsObjects(Int_t iter);
   void PrepareCorrelations(void);
+  Bool_t FollowsPrior(int j);
+  void ForcePrior(int j);
   Int_t fNPar; // Number of free parameters (number of templates for fitting)
   TH1D ** fFitDiagsMC; // The MC templates
   TH1D * fFitDiagData; // Data input histogram
   double * fAji; // consecutive arrays of the Aji with fixed j
   double * fpj;
+  Int_t AjiPriorExponent;
   Int_t fNBins;
   Int_t fNIterations;
   Double_t fBurnInRatio;
@@ -62,6 +69,8 @@ private:
   Bool_t IsBurnIn;
   Bool_t fMakepjCorrelations;
   Bool_t fMakeAjiCorrelations;
+  Int_t fLowBinFitRange;
+  Int_t fHighBinFitRange;
   Int_t fAccrejTries;
   Int_t fAccrejAcc;
   Int_t fConsideredParameter;
